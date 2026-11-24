@@ -1,4 +1,140 @@
-import streamlit as st, streamlit.components.v1 as components
+cat << 'EOF' > ~/gen_pro.py
+import json, unittest.mock as m
+m.patch("cv2.VideoCapture", return_value=m.Mock(read=m.Mock(return_value=(False, None)))).start()
+import ar_hologram
+
+jets = json.dumps([[n, p, e, [list(q) for q in f]] for n, (p, e, f) in ar_hologram.AIRCRAFT.items()])
+
+html = f'''<!DOCTYPE html><html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<script src="https://jsdelivr.net" crossorigin="anonymous"></script>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box;user-select:none;-webkit-user-select:none}}
+html,body{{width:100%;height:100%;background:#000;overflow:hidden;font-family:-apple-system,sans-serif}}
+video,canvas{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover}}
+#hud{{position:fixed;top:14px;left:14px;right:14px;display:flex;justify-content:space-between;align-items:center;color:#0ff;font-weight:700;font-size:14px;text-shadow:0 0 10px currentColor;z-index:10;pointer-events:none}}
+#badge{{padding:4px 10px;border-radius:20px;border:1px solid currentColor;background:rgba(0,0,0,.5);font-size:12px}}
+#bar{{position:fixed;bottom:20px;left:12px;right:12px;display:flex;gap:8px;z-index:10}}
+button{{flex:1;padding:13px 6px;border:1.5px solid #0ff;background:rgba(0,15,25,.7);color:#0ff;font-weight:700;border-radius:12px;font-size:13px;backdrop-filter:blur(6px)}}
+button:active{{transform:scale(.95)}}
+</style></head><body>
+<video id="v" autoplay playsinline muted></video>
+<canvas id="c"></canvas>
+<div id="hud"><span id="nm"></span><span id="badge">Loading AI Hand Tracker...</span></div>
+<div id="bar">
+  <button onclick="si=(si+9)%10;upd()">◀ Prev</button>
+  <button onclick="ci=(ci+1)%6;upd()">Color</button>
+  <button onclick="cam=!cam;startCam();upd()">Cam: <span id="cm">Front</span></button>
+  <button onclick="si=(si+1)%10;upd()">Next ▶</button>
+</div>
+<script>
+const JETS={jets},COLS=['#00ffff','#32ff32','#ff00ff','#3b82f6','#ffd700','#ff3b30'];
+const v=document.getElementById('v'),c=document.getElementById('c'),ctx=c.getContext('2d'),badge=document.getElementById('badge');
+let cam=true,stream=null,si=0,ci=0,sc=100,ax=0.42,ay=0,pd=0,lx=0,ly=0,dr=false;
+let p1=null,p2=null,baseSpan=null,baseSc=null,aiReady=false,busy=false;
+
+function startCam(){{
+  if(stream)stream.getTracks().forEach(t=>t.stop());
+  navigator.mediaDevices.getUserMedia({{video:{{facingMode:cam?'user':'environment',width:{{ideal:640}},height:{{ideal:480}}}},audio:false}})
+  .then(s=>{{stream=s;v.srcObject=s;v.style.transform=cam?'scaleX(-1)':'none';}});
+}}
+startCam();
+
+const upd=()=>{{
+  const col=COLS.at(ci);
+  document.getElementById('nm').textContent=JETS.at(si).at(0);
+  document.getElementById('cm').textContent=cam?'Front':'Rear';
+  document.getElementById('hud').style.color=col;
+  document.querySelectorAll('button').forEach(b=>{{b.style.color=col;b.style.borderColor=col;}});
+}};
+upd();
+
+// MediaPipe Skeletal Hand Tracking
+const hands=new Hands({{locateFile:f=>`https://jsdelivr.net{{f}}`}});
+hands.setOptions({{maxNumHands:2,modelComplexity:0,minDetectionConfidence:0.6,minTrackingConfidence:0.6}});
+hands.onResults(res=>{{
+  aiReady=true;
+  const lms=res.multiHandLandmarks;
+  if(lms&&lms.length===2){{
+    // Landmark 8 = Index Finger Tip
+    const hA=lms.at(0).at(8),hB=lms.at(1).at(8);
+    const xA=(cam?(1-hA.x):hA.x)*c.width,yA=hA.y*c.height;
+    const xB=(cam?(1-hB.x):hB.x)*c.width,yB=hB.y*c.height;
+    const raw1=xA<xB?[xA,yA]:[xB,yB],raw2=xA<xB?[xB,yB]:[xA,yA];
+    if(!p1){{p1=raw1;p2=raw2;baseSpan=Math.max(Math.hypot(p2.at(0)-p1.at(0),p2.at(1)-p1.at(1)),40);baseSc=sc;}}
+    else{{
+      p1=[p1.at(0)*0.6+raw1.at(0)*0.4,p1.at(1)*0.6+raw1.at(1)*0.4];
+      p2=[p2.at(0)*0.6+raw2.at(0)*0.4,p2.at(1)*0.6+raw2.at(1)*0.4];
+      const span=Math.hypot(p2.at(0)-p1.at(0),p2.at(1)-p1.at(1));
+      sc=Math.max(35,Math.min(260,baseSc*(span/baseSpan)));
+    }}
+    badge.textContent='2 HANDS LOCKED • Stretch!';
+  }}else{{
+    p1=p2=baseSpan=null;
+    badge.textContent=aiReady?'Show 2 Hands or Pinch Screen':'Loading AI Hand Tracker...';
+  }}
+}});
+
+setInterval(async()=>{{
+  if(!busy&&v.readyState>=2){{busy=true;try{{await hands.send({{image:v}});}}catch(e){{}}busy=false;}}
+}},45);
+
+// Touch Pinch & Drag Fallback
+c.ontouchstart=e=>{{if(e.touches.length===2)pd=Math.hypot(e.touches.item(0).clientX-e.touches.item(1).clientX,e.touches.item(0).clientY-e.touches.item(1).clientY);else{{dr=true;lx=e.touches.item(0).clientX;ly=e.touches.item(0).clientY;}}}};
+c.ontouchmove=e=>{{e.preventDefault();if(e.touches.length===2){{const d=Math.hypot(e.touches.item(0).clientX-e.touches.item(1).clientX,e.touches.item(0).clientY-e.touches.item(1).clientY);if(pd>0)sc=Math.max(35,Math.min(260,sc*(d/pd)));pd=d;}}else if(dr){{ay+=(e.touches.item(0).clientX-lx)*.012;ax+=(e.touches.item(0).clientY-ly)*.012;lx=e.touches.item(0).clientX;ly=e.touches.item(0).clientY;}}}};
+c.ontouchend=()=>{{dr=false;pd=0;}};
+
+function loop(){{
+  c.width=window.innerWidth;c.height=window.innerHeight;
+  ctx.clearRect(0,0,c.width,c.height);
+  const col=COLS.at(ci);
+
+  if(p1&&p2){{
+    ctx.strokeStyle=col;ctx.lineWidth=3;ctx.shadowColor=col;ctx.shadowBlur=12;
+    ctx.beginPath();ctx.moveTo(p1.at(0),p1.at(1));ctx.lineTo(p2.at(0),p2.at(1));ctx.stroke();
+    [p1,p2].forEach(pt=>{{
+      ctx.beginPath();ctx.arc(pt.at(0),pt.at(1),16,0,6.28);ctx.stroke();
+      ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(pt.at(0),pt.at(1),5,0,6.28);ctx.fill();
+    }});
+    ctx.shadowBlur=0;
+  }}
+
+  if(!dr)ay+=0.015;
+  const jet=JETS.at(si),pts=jet.at(1),edges=jet.at(2),polys=jet.at(3);
+  const cx=c.width/2,cy=c.height/2,ca=Math.cos(ax),sa=Math.sin(ax),cb=Math.cos(ay),sb=Math.sin(ay);
+  const p2d=pts.map(([x,y,z])=>{{
+    const y1=y*ca-z*sa,z1=y*sa+z*ca,x2=x*cb+z1*sb,z2=-x*sb+z1*cb,f=4.2/(4.2+z2);
+    return[cx+x2*sc*f,cy+y1*sc*f];
+  }});
+
+  ctx.fillStyle=col+'28';
+  polys.forEach(q=>{{ctx.beginPath();q.forEach((i,k)=>k?ctx.lineTo(p2d.at(i).at(0),p2d.at(i).at(1)):ctx.moveTo(p2d.at(i).at(0),p2d.at(i).at(1)));ctx.closePath();ctx.fill();}});
+  ctx.strokeStyle=col;ctx.lineWidth=4;ctx.shadowColor=col;ctx.shadowBlur=12;
+  edges.forEach(([a,b])=>{{ctx.beginPath();ctx.moveTo(p2d.at(a).at(0),p2d.at(a).at(1));ctx.lineTo(p2d.at(b).at(0),p2d.at(b).at(1));ctx.stroke();}});
+  ctx.strokeStyle='#fff';ctx.lineWidth=1;ctx.shadowBlur=0;
+  edges.forEach(([a,b])=>{{ctx.beginPath();ctx.moveTo(p2d.at(a).at(0),p2d.at(a).at(1));ctx.lineTo(p2d.at(b).at(0),p2d.at(b).at(1));ctx.stroke();}});
+  requestAnimationFrame(loop);
+}}
+loop();
+</script></body></html>'''
+
+app_code = f'''import streamlit as st
+import streamlit.components.v1 as components
+
 st.set_page_config(page_title="AR Aircraft Hologram", layout="wide")
-st.markdown("<style>.block-container{padding:0;max-width:100%}header,footer{visibility:hidden}</style>", unsafe_allow_html=True)
-components.html('<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>AR Aircraft Hologram</title><style>\n*{margin:0;padding:0;user-select:none;-webkit-user-select:none}body{background:#000;overflow:hidden;font-family:-apple-system,sans-serif}video,canvas{position:fixed;inset:0;width:100vw;height:100vh;object-fit:cover}\n#hud{position:fixed;top:16px;left:16px;right:16px;display:flex;justify-content:space-between;color:#0ff;font-weight:700;font-size:14px;text-shadow:0 0 8px currentColor}\n#bar{position:fixed;bottom:24px;left:12px;right:12px;display:flex;gap:8px}button{flex:1;padding:13px 6px;border:1.5px solid #0ff;background:rgba(0,15,25,.65);color:#0ff;font-weight:700;border-radius:12px;font-size:13px}\n</style></head><body><video id="v" autoplay playsinline muted></video><canvas id="c"></canvas><canvas id="tc" width="160" height="120" style="display:none"></canvas>\n<div id="hud"><span id="nm"></span><span id="st">Wave Both Hands or Pinch</span></div>\n<div id="bar"><button onclick="si=(si+9)%10;upd()">◀ Prev</button><button onclick="ci=(ci+1)%6;upd()">Color</button><button onclick="cam=!cam;start();upd()">Cam: <span id="cm">Front</span></button><button onclick="si=(si+1)%10;upd()">Next ▶</button></div>\n<script>\nconst JETS=[["1. F-22 Raptor", [[0, 0.02, -2.1], [0, -0.09, -1.45], [0, -0.28, -0.95], [0, -0.24, -0.25], [0, -0.12, 0.45], [0, -0.05, 1.4], [0, 0.11, -1.35], [0, 0.14, -0.1], [0, 0.12, 1.4], [0.24, 0.01, -1.25], [0.38, -0.02, -0.5], [0.42, -0.02, 0.75], [0.34, 0, 1.45], [0.22, 0.12, -0.5], [0.28, 0.11, 1.45], [1.68, 0.02, 0.48], [1.58, 0.02, 0.82], [0.42, 0, 0.88], [0.92, 0.02, 1.45], [0.38, 0.01, 1.52], [0.58, -0.64, 1.35], [0.48, -0.64, 1.6], [0.36, -0.03, 1.42], [-0.24, 0.01, -1.25], [-0.38, -0.02, -0.5], [-0.42, -0.02, 0.75], [-0.34, 0, 1.45], [-0.22, 0.12, -0.5], [-0.28, 0.11, 1.45], [-1.68, 0.02, 0.48], [-1.58, 0.02, 0.82], [-0.42, 0, 0.88], [-0.92, 0.02, 1.45], [-0.38, 0.01, 1.52], [-0.58, -0.64, 1.35], [-0.48, -0.64, 1.6], [-0.36, -0.03, 1.42]], [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [0, 6], [6, 7], [7, 8], [0, 9], [9, 10], [10, 11], [11, 12], [9, 6], [10, 13], [13, 14], [14, 12], [13, 7], [14, 8], [1, 9], [2, 10], [3, 10], [4, 11], [5, 12], [10, 15], [15, 16], [16, 17], [17, 11], [11, 18], [18, 19], [19, 12], [11, 20], [20, 21], [21, 22], [22, 12], [5, 8], [0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [0, 6], [6, 7], [7, 8], [0, 23], [23, 24], [24, 25], [25, 26], [23, 6], [24, 27], [27, 28], [28, 26], [27, 7], [28, 8], [1, 23], [2, 24], [3, 24], [4, 25], [5, 26], [24, 29], [29, 30], [30, 31], [31, 25], [25, 32], [32, 33], [33, 26], [25, 34], [34, 35], [35, 36], [36, 26], [5, 8]], [[0, 1, 9], [1, 2, 10, 9], [2, 3, 10], [3, 4, 11, 10], [4, 5, 12, 11], [10, 15, 16, 17, 11], [11, 18, 19, 12], [11, 20, 21, 22, 12], [9, 10, 13, 6], [0, 1, 23], [1, 2, 24, 23], [2, 3, 24], [3, 4, 25, 24], [4, 5, 26, 25], [24, 29, 30, 31, 25], [25, 32, 33, 26], [25, 34, 35, 36, 26], [23, 24, 27, 6]]], ["2. F-35 Lightning II", [[0, 0.03, -1.85], [0, -0.09, -1.3], [0, -0.3, -0.85], [0, -0.26, -0.15], [0, -0.14, 0.45], [0, -0.08, 1.35], [0, 0.14, -1.25], [0, 0.2, 0], [0, 0.14, 1.35], [0.24, 0.02, -1.15], [0.46, -0.03, -0.4], [0.46, -0.02, 0.7], [0.18, 0, 1.45], [0.28, 0.18, -0.4], [0.18, 0.14, 1.45], [1.48, 0.03, 0.42], [1.38, 0.03, 0.76], [0.44, 0, 0.8], [0.82, 0.03, 1.38], [0.24, 0.02, 1.45], [0.62, -0.56, 1.28], [0.52, -0.56, 1.52], [0.28, -0.04, 1.4], [-0.24, 0.02, -1.15], [-0.46, -0.03, -0.4], [-0.46, -0.02, 0.7], [-0.18, 0, 1.45], [-0.28, 0.18, -0.4], [-0.18, 0.14, 1.45], [-1.48, 0.03, 0.42], [-1.38, 0.03, 0.76], [-0.44, 0, 0.8], [-0.82, 0.03, 1.38], [-0.24, 0.02, 1.45], [-0.62, -0.56, 1.28], [-0.52, -0.56, 1.52], [-0.28, -0.04, 1.4]], [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [0, 6], [6, 7], [7, 8], [0, 9], [9, 10], [10, 11], [11, 12], [9, 6], [10, 13], [13, 14], [14, 12], [13, 7], [14, 8], [1, 9], [2, 10], [3, 10], [4, 11], [5, 12], [10, 15], [15, 16], [16, 17], [17, 11], [11, 18], [18, 19], [19, 12], [11, 20], [20, 21], [21, 22], [22, 12], [5, 8], [0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [0, 6], [6, 7], [7, 8], [0, 23], [23, 24], [24, 25], [25, 26], [23, 6], [24, 27], [27, 28], [28, 26], [27, 7], [28, 8], [1, 23], [2, 24], [3, 24], [4, 25], [5, 26], [24, 29], [29, 30], [30, 31], [31, 25], [25, 32], [32, 33], [33, 26], [25, 34], [34, 35], [35, 36], [36, 26], [5, 8]], [[0, 1, 9], [1, 2, 10, 9], [2, 3, 10], [3, 4, 11, 10], [4, 5, 12, 11], [10, 15, 16, 17, 11], [11, 18, 19, 12], [11, 20, 21, 22, 12], [9, 10, 13, 6], [0, 1, 23], [1, 2, 24, 23], [2, 3, 24], [3, 4, 25, 24], [4, 5, 26, 25], [24, 29, 30, 31, 25], [25, 32, 33, 26], [25, 34, 35, 36, 26], [23, 24, 27, 6]]], ["3. B-2 Spirit", [[0, 0.04, -1.25], [0, -0.22, -0.65], [0, -0.16, 0.15], [0, -0.04, 0.85], [0, 0.12, -0.5], [0, 0.1, 0.75], [0.38, -0.12, -0.45], [0.45, -0.05, 0.25], [2.2, 0.04, 0.55], [2.0, 0.04, 0.78], [1.38, 0.02, 0.52], [0.78, 0, 0.88], [0.38, 0, 0.62], [-0.38, -0.12, -0.45], [-0.45, -0.05, 0.25], [-2.2, 0.04, 0.55], [-2.0, 0.04, 0.78], [-1.38, 0.02, 0.52], [-0.78, 0, 0.88], [-0.38, 0, 0.62]], [[0, 1], [1, 2], [2, 3], [0, 4], [4, 5], [5, 3], [0, 6], [1, 6], [6, 7], [2, 7], [6, 4], [7, 5], [0, 8], [8, 9], [9, 10], [10, 11], [11, 12], [12, 3], [6, 10], [7, 11], [7, 12], [0, 1], [1, 2], [2, 3], [0, 4], [4, 5], [5, 3], [0, 13], [1, 13], [13, 14], [2, 14], [13, 4], [14, 5], [0, 15], [15, 16], [16, 17], [17, 18], [18, 19], [19, 3], [13, 17], [14, 18], [14, 19]], [[0, 1, 6], [1, 2, 7, 6], [2, 3, 12, 7], [0, 6, 8, 9, 10], [6, 7, 11, 10], [7, 12, 11], [0, 4, 6], [0, 1, 13], [1, 2, 14, 13], [2, 3, 19, 14], [0, 13, 15, 16, 17], [13, 14, 18, 17], [14, 19, 18], [0, 4, 13]]], ["4. B-21 Raider", [[0, 0.03, -1.2], [0, -0.19, -0.6], [0, -0.13, 0.15], [0, -0.03, 0.58], [0, 0.1, -0.45], [0, 0.08, 0.55], [0.34, -0.09, -0.4], [0.38, -0.04, 0.2], [2.05, 0.03, 0.55], [1.88, 0.03, 0.74], [0.95, 0.01, 0.92], [0.45, 0, 0.66], [-0.34, -0.09, -0.4], [-0.38, -0.04, 0.2], [-2.05, 0.03, 0.55], [-1.88, 0.03, 0.74], [-0.95, 0.01, 0.92], [-0.45, 0, 0.66]], [[0, 1], [1, 2], [2, 3], [0, 4], [4, 5], [5, 3], [0, 6], [1, 6], [6, 7], [2, 7], [6, 4], [7, 5], [0, 8], [8, 9], [9, 10], [10, 11], [11, 3], [6, 10], [7, 11], [0, 1], [1, 2], [2, 3], [0, 4], [4, 5], [5, 3], [0, 12], [1, 12], [12, 13], [2, 13], [12, 4], [13, 5], [0, 14], [14, 15], [15, 16], [16, 17], [17, 3], [12, 16], [13, 17]], [[0, 1, 6], [1, 2, 7, 6], [2, 3, 11, 7], [0, 6, 8, 9, 10], [6, 7, 10, 11], [0, 4, 6], [0, 1, 12], [1, 2, 13, 12], [2, 3, 17, 13], [0, 12, 14, 15, 16], [12, 13, 16, 17], [0, 4, 12]]], ["5. F-15 Eagle", [[0, 0.04, -2.05], [0, -0.11, -1.4], [0, -0.32, -0.9], [0, -0.25, -0.2], [0, -0.11, 0.5], [0, -0.08, 1.45], [0, 0.12, -1.3], [0, 0.16, 0], [0, 0.14, 1.45], [0.18, 0.02, -1.25], [0.38, -0.1, -0.55], [0.38, -0.08, 0.85], [0.28, -0.05, 1.5], [0.34, 0.16, -0.55], [0.28, 0.14, 1.5], [1.65, -0.06, 0.62], [1.55, -0.06, 0.92], [0.38, -0.06, 0.92], [0.85, 0.02, 1.48], [0.32, 0, 1.54], [0.32, -0.68, 1.22], [0.32, -0.68, 1.52], [0.32, -0.08, 1.46], [-0.18, 0.02, -1.25], [-0.38, -0.1, -0.55], [-0.38, -0.08, 0.85], [-0.28, -0.05, 1.5], [-0.34, 0.16, -0.55], [-0.28, 0.14, 1.5], [-1.65, -0.06, 0.62], [-1.55, -0.06, 0.92], [-0.38, -0.06, 0.92], [-0.85, 0.02, 1.48], [-0.32, 0, 1.54], [-0.32, -0.68, 1.22], [-0.32, -0.68, 1.52], [-0.32, -0.08, 1.46]], [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [0, 6], [6, 7], [7, 8], [0, 9], [9, 10], [10, 11], [11, 12], [9, 6], [10, 13], [13, 14], [14, 12], [13, 7], [14, 8], [1, 9], [2, 10], [3, 10], [4, 11], [5, 12], [10, 15], [15, 16], [16, 17], [17, 11], [11, 18], [18, 19], [19, 12], [11, 20], [20, 21], [21, 22], [22, 12], [5, 8], [0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [0, 6], [6, 7], [7, 8], [0, 23], [23, 24], [24, 25], [25, 26], [23, 6], [24, 27], [27, 28], [28, 26], [27, 7], [28, 8], [1, 23], [2, 24], [3, 24], [4, 25], [5, 26], [24, 29], [29, 30], [30, 31], [31, 25], [25, 32], [32, 33], [33, 26], [25, 34], [34, 35], [35, 36], [36, 26], [5, 8]], [[0, 1, 9], [1, 2, 10, 9], [2, 3, 10], [3, 4, 11, 10], [4, 5, 12, 11], [10, 15, 16, 17, 11], [11, 18, 19, 12], [11, 20, 21, 22, 12], [9, 10, 13, 6], [0, 1, 23], [1, 2, 24, 23], [2, 3, 24], [3, 4, 25, 24], [4, 5, 26, 25], [24, 29, 30, 31, 25], [25, 32, 33, 26], [25, 34, 35, 36, 26], [23, 24, 27, 6]]], ["6. F-16 Fighting Falcon", [[0, 0.04, -1.95], [0, -0.08, -1.35], [0, -0.33, -0.85], [0, -0.26, -0.15], [0, -0.11, 0.5], [0, -0.08, 1.45], [0, 0.12, -1.25], [0, 0.23, -0.45], [0, 0.14, 1.45], [0.16, 0.02, -1.2], [0.34, -0.02, -0.4], [0.34, -0.02, 0.75], [0.16, 0, 1.5], [0.18, 0.19, -0.45], [0.16, 0.12, 1.5], [1.42, 0.02, 0.55], [1.32, 0.02, 0.82], [0.34, 0, 0.82], [0.76, 0.02, 1.42], [0.2, 0, 1.48], [0, -0.72, 1.25], [0, -0.72, 1.52], [0, -0.08, 1.48], [-0.16, 0.02, -1.2], [-0.34, -0.02, -0.4], [-0.34, -0.02, 0.75], [-0.16, 0, 1.5], [-0.18, 0.19, -0.45], [-0.16, 0.12, 1.5], [-1.42, 0.02, 0.55], [-1.32, 0.02, 0.82], [-0.34, 0, 0.82], [-0.76, 0.02, 1.42], [-0.2, 0, 1.48]], [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [0, 6], [6, 7], [7, 8], [0, 9], [9, 10], [10, 11], [11, 12], [9, 6], [10, 13], [13, 14], [14, 12], [13, 7], [14, 8], [1, 9], [2, 10], [3, 10], [4, 11], [5, 12], [10, 15], [15, 16], [16, 17], [17, 11], [11, 18], [18, 19], [19, 12], [4, 20], [20, 21], [21, 22], [22, 5], [5, 8], [0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [0, 6], [6, 7], [7, 8], [0, 23], [23, 24], [24, 25], [25, 26], [23, 6], [24, 27], [27, 28], [28, 26], [27, 7], [28, 8], [1, 23], [2, 24], [3, 24], [4, 25], [5, 26], [24, 29], [29, 30], [30, 31], [31, 25], [25, 32], [32, 33], [33, 26], [4, 20], [20, 21], [21, 22], [22, 5], [5, 8]], [[0, 1, 9], [1, 2, 10, 9], [2, 3, 10], [3, 4, 11, 10], [4, 5, 12, 11], [10, 15, 16, 17, 11], [11, 18, 19, 12], [4, 20, 21, 22, 5], [9, 10, 13, 6], [0, 1, 23], [1, 2, 24, 23], [2, 3, 24], [3, 4, 25, 24], [4, 5, 26, 25], [24, 29, 30, 31, 25], [25, 32, 33, 26], [4, 20, 21, 22, 5], [23, 24, 27, 6]]], ["7. F/A-18 Hornet", [[0, 0.03, -2.05], [0, -0.09, -1.4], [0, -0.3, -0.9], [0, -0.24, -0.2], [0, -0.11, 0.5], [0, -0.07, 1.45], [0, 0.12, -1.3], [0, 0.16, 0], [0, 0.13, 1.45], [0.2, 0.01, -1.15], [0.44, -0.02, -0.2], [0.36, -0.02, 0.8], [0.26, 0, 1.48], [0.24, 0.15, -0.3], [0.24, 0.12, 1.48], [1.58, 0.02, 0.25], [1.58, 0.02, 0.72], [0.36, 0, 0.78], [0.82, 0.03, 1.42], [0.3, 0.01, 1.48], [0.58, -0.6, 1.22], [0.5, -0.6, 1.5], [0.28, -0.05, 1.4], [-0.2, 0.01, -1.15], [-0.44, -0.02, -0.2], [-0.36, -0.02, 0.8], [-0.26, 0, 1.48], [-0.24, 0.15, -0.3], [-0.24, 0.12, 1.48], [-1.58, 0.02, 0.25], [-1.58, 0.02, 0.72], [-0.36, 0, 0.78], [-0.82, 0.03, 1.42], [-0.3, 0.01, 1.48], [-0.58, -0.6, 1.22], [-0.5, -0.6, 1.5], [-0.28, -0.05, 1.4]], [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [0, 6], [6, 7], [7, 8], [0, 9], [9, 10], [10, 11], [11, 12], [9, 6], [10, 13], [13, 14], [14, 12], [13, 7], [14, 8], [1, 9], [2, 10], [3, 10], [4, 11], [5, 12], [10, 15], [15, 16], [16, 17], [17, 11], [11, 18], [18, 19], [19, 12], [11, 20], [20, 21], [21, 22], [22, 12], [5, 8], [0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [0, 6], [6, 7], [7, 8], [0, 23], [23, 24], [24, 25], [25, 26], [23, 6], [24, 27], [27, 28], [28, 26], [27, 7], [28, 8], [1, 23], [2, 24], [3, 24], [4, 25], [5, 26], [24, 29], [29, 30], [30, 31], [31, 25], [25, 32], [32, 33], [33, 26], [25, 34], [34, 35], [35, 36], [36, 26], [5, 8]], [[0, 1, 9], [1, 2, 10, 9], [2, 3, 10], [3, 4, 11, 10], [4, 5, 12, 11], [10, 15, 16, 17, 11], [11, 18, 19, 12], [11, 20, 21, 22, 12], [9, 10, 13, 6], [0, 1, 23], [1, 2, 24, 23], [2, 3, 24], [3, 4, 25, 24], [4, 5, 26, 25], [24, 29, 30, 31, 25], [25, 32, 33, 26], [25, 34, 35, 36, 26], [23, 24, 27, 6]]], ["8. B-1B Lancer", [[0, 0.05, -2.45], [0, -0.06, -1.7], [0, -0.21, -1.3], [0, -0.17, -0.65], [0, -0.13, 0.65], [0, -0.08, 1.9], [0, 0.12, -1.6], [0, 0.16, -0.2], [0, 0.12, 1.9], [0.16, 0.02, -1.5], [0.32, -0.02, -0.45], [0.3, -0.02, 0.75], [0.2, 0, 1.95], [0.26, 0.15, -0.35], [0.2, 0.12, 1.95], [1.95, 0.02, 0.85], [1.85, 0.02, 1.12], [0.3, 0, 0.9], [0, -0.72, 1.65], [0, -0.72, 1.98], [0, -0.08, 1.95], [0.68, -0.36, 1.8], [0.6, -0.36, 1.98], [0, -0.36, 1.84], [-0.16, 0.02, -1.5], [-0.32, -0.02, -0.45], [-0.3, -0.02, 0.75], [-0.2, 0, 1.95], [-0.26, 0.15, -0.35], [-0.2, 0.12, 1.95], [-1.95, 0.02, 0.85], [-1.85, 0.02, 1.12], [-0.3, 0, 0.9], [-0.68, -0.36, 1.8], [-0.6, -0.36, 1.98]], [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [0, 6], [6, 7], [7, 8], [0, 9], [9, 10], [10, 11], [11, 12], [9, 6], [10, 13], [13, 14], [14, 12], [13, 7], [14, 8], [1, 9], [2, 10], [3, 10], [4, 11], [5, 12], [10, 15], [15, 16], [16, 17], [17, 11], [4, 18], [18, 19], [19, 20], [20, 5], [23, 21], [21, 22], [22, 23], [5, 8], [0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [0, 6], [6, 7], [7, 8], [0, 24], [24, 25], [25, 26], [26, 27], [24, 6], [25, 28], [28, 29], [29, 27], [28, 7], [29, 8], [1, 24], [2, 25], [3, 25], [4, 26], [5, 27], [25, 30], [30, 31], [31, 32], [32, 26], [4, 18], [18, 19], [19, 20], [20, 5], [23, 33], [33, 34], [34, 23], [5, 8]], [[0, 1, 9], [1, 2, 10, 9], [2, 3, 10], [3, 4, 11, 10], [4, 5, 12, 11], [10, 15, 16, 17, 11], [4, 18, 19, 20, 5], [23, 21, 22], [0, 1, 24], [1, 2, 25, 24], [2, 3, 25], [3, 4, 26, 25], [4, 5, 27, 26], [25, 30, 31, 32, 26], [4, 18, 19, 20, 5], [23, 33, 34]]], ["9. AH-64 Apache", [[0, 0.18, -1.55], [0, -0.06, -1.2], [0, -0.28, -0.8], [0, -0.3, -0.2], [0, -0.12, 0.45], [0, -0.06, 1.75], [0, 0.24, -1.1], [0, 0.26, -0.15], [0, 0.06, 1.75], [0.16, 0.08, -1.1], [0.24, 0.02, -0.2], [0.16, 0.02, 0.45], [0.08, 0, 1.75], [0.85, 0.08, -0.15], [0.85, 0.08, 0.12], [0.22, 0.05, 0.15], [0, -0.48, 1.62], [0, -0.48, 1.85], [0.3, -0.38, 1.75], [0, -0.44, -0.3], [1.7, -0.44, -0.3], [-1.7, -0.44, -0.3], [0, -0.44, -2.0], [0, -0.44, 1.4], [0, 0.32, -1.15], [-0.16, 0.08, -1.1], [-0.24, 0.02, -0.2], [-0.16, 0.02, 0.45], [-0.08, 0, 1.75], [-0.85, 0.08, -0.15], [-0.85, 0.08, 0.12], [-0.22, 0.05, 0.15], [-0.3, -0.38, 1.75]], [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [0, 6], [6, 7], [7, 8], [0, 9], [9, 10], [10, 11], [11, 12], [9, 6], [10, 7], [11, 8], [1, 9], [2, 10], [3, 10], [4, 11], [5, 12], [10, 13], [13, 14], [14, 15], [15, 11], [5, 16], [16, 17], [17, 8], [16, 18], [18, 17], [3, 19], [19, 20], [19, 21], [19, 22], [19, 23], [6, 24], [0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [0, 6], [6, 7], [7, 8], [0, 25], [25, 26], [26, 27], [27, 28], [25, 6], [26, 7], [27, 8], [1, 25], [2, 26], [3, 26], [4, 27], [5, 28], [26, 29], [29, 30], [30, 31], [31, 27], [5, 16], [16, 17], [17, 8], [16, 32], [32, 17], [3, 19], [19, 20], [19, 21], [19, 22], [19, 23], [6, 24]], [[0, 1, 9], [1, 2, 10, 9], [2, 3, 10], [3, 4, 11, 10], [4, 5, 12, 11], [10, 13, 14, 15, 11], [5, 16, 17, 8], [9, 10, 7, 6], [0, 1, 25], [1, 2, 26, 25], [2, 3, 26], [3, 4, 27, 26], [4, 5, 28, 27], [26, 29, 30, 31, 27], [5, 16, 17, 8], [25, 26, 7, 6]]], ["10. A-10 Thunderbolt II", [[0, 0.06, -1.85], [0, -0.08, -1.3], [0, -0.26, -0.85], [0, -0.15, -0.25], [0, -0.1, 0.55], [0, -0.06, 1.55], [0, 0.18, -1.25], [0, 0.18, 0.1], [0, 0.1, 1.55], [0.2, 0.02, -1.2], [0.24, 0.02, 0.45], [0.14, 0.02, 1.55], [1.95, 0.02, -0.18], [1.95, 0.02, 0.28], [0.24, 0.04, 0.28], [0.24, 0.04, -0.18], [0.38, -0.26, 0.55], [0.38, -0.26, 1.08], [0.2, -0.12, 0.8], [0.78, -0.06, 1.42], [0.78, -0.06, 1.65], [0.14, -0.06, 1.65], [0.78, -0.54, 1.42], [0.78, -0.54, 1.65], [0.78, 0.12, 1.55], [-0.2, 0.02, -1.2], [-0.24, 0.02, 0.45], [-0.14, 0.02, 1.55], [-1.95, 0.02, -0.18], [-1.95, 0.02, 0.28], [-0.24, 0.04, 0.28], [-0.24, 0.04, -0.18], [-0.38, -0.26, 0.55], [-0.38, -0.26, 1.08], [-0.2, -0.12, 0.8], [-0.78, -0.06, 1.42], [-0.78, -0.06, 1.65], [-0.14, -0.06, 1.65], [-0.78, -0.54, 1.42], [-0.78, -0.54, 1.65], [-0.78, 0.12, 1.55]], [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [0, 6], [6, 7], [7, 8], [0, 9], [9, 10], [10, 11], [9, 6], [10, 7], [11, 8], [1, 9], [2, 9], [3, 10], [4, 10], [5, 11], [15, 12], [12, 13], [13, 14], [14, 15], [18, 16], [16, 17], [17, 18], [11, 19], [19, 20], [20, 21], [21, 11], [19, 22], [22, 23], [23, 20], [20, 24], [24, 19], [0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [0, 6], [6, 7], [7, 8], [0, 25], [25, 26], [26, 27], [25, 6], [26, 7], [27, 8], [1, 25], [2, 25], [3, 26], [4, 26], [5, 27], [31, 28], [28, 29], [29, 30], [30, 31], [34, 32], [32, 33], [33, 34], [27, 35], [35, 36], [36, 37], [37, 27], [35, 38], [38, 39], [39, 36], [36, 40], [40, 35]], [[0, 1, 9], [1, 2, 9], [2, 3, 10, 9], [3, 4, 10], [4, 5, 11, 10], [15, 12, 13, 14], [18, 16, 17], [11, 19, 20, 21], [19, 22, 23, 20], [9, 10, 7, 6], [0, 1, 25], [1, 2, 25], [2, 3, 26, 25], [3, 4, 26], [4, 5, 27, 26], [31, 28, 29, 30], [34, 32, 33], [27, 35, 36, 37], [35, 38, 39, 36], [25, 26, 7, 6]]]],COLS=[\'#00ffff\',\'#32ff32\',\'#ff00ff\',\'#3b82f6\',\'#ffd700\',\'#ff3b30\'],v=document.getElementById(\'v\'),c=document.getElementById(\'c\'),ctx=c.getContext(\'2d\'),tc=document.getElementById(\'tc\'),tctx=tc.getContext(\'2d\',{willReadFrequently:true});\nlet cam=true,st=null,si=0,ci=0,sc=95,ax=.42,ay=0,pd=0,lx=0,ly=0,dr=false,sh1=null,sh2=null,aspan=null,asc=null,hold=0,prev=null;\nfunction start(){if(st)st.getTracks().forEach(t=>t.stop());prev=null;navigator.mediaDevices.getUserMedia({video:{facingMode:cam?\'user\':\'environment\'},audio:false}).then(s=>{st=s;v.srcObject=s;v.style.transform=cam?\'scaleX(-1)\':\'none\';});}start();\nconst upd=()=>{const col=COLS[ci];document.getElementById(\'nm\').textContent=JETS.at(si).at(0);document.getElementById(\'cm\').textContent=cam?\'Front\':\'Rear\';document.getElementById(\'hud\').style.color=col;document.querySelectorAll(\'button\').forEach(b=>{b.style.color=col;b.style.borderColor=col;});};upd();\nc.ontouchstart=e=>{if(e.touches.length===2)pd=Math.hypot(e.touches.item(0).clientX-e.touches.item(1).clientX,e.touches.item(0).clientY-e.touches.item(1).clientY);else{dr=true;lx=e.touches.item(0).clientX;ly=e.touches.item(0).clientY;}};\nc.ontouchmove=e=>{e.preventDefault();if(e.touches.length===2){const d=Math.hypot(e.touches.item(0).clientX-e.touches.item(1).clientX,e.touches.item(0).clientY-e.touches.item(1).clientY);if(pd>0)sc=Math.max(35,Math.min(240,sc*(d/pd)));pd=d;}else if(dr){ay+=(e.touches.item(0).clientX-lx)*.012;ax+=(e.touches.item(0).clientY-ly)*.012;lx=e.touches.item(0).clientX;ly=e.touches.item(0).clientY;}};\nc.ontouchend=()=>{dr=false;pd=0;};\nfunction track(){if(v.readyState<2)return null;tctx.drawImage(v,0,0,160,120);const d=tctx.getImageData(0,0,160,120).data;let lx=0,ly=0,lc=0,rx=0,ry=0,rc=0;\nfor(let y=8;y<116;y+=2)for(let x=4;x<156;x+=2){if(x>58&&x<102&&y<78)continue;const i=(y*160+x)*4,R=d.at(i),G=d.at(i+1),B=d.at(i+2);\nconst Y=.299*R+.587*G+.114*B,Cr=128+.5*R-.419*G-.081*B,Cb=128-.169*R-.331*G+.5*B;\nconst skin=(Cr>128&&Cr<185&&Cb>70&&Cb<135&&Y>30);\nconst diff=prev?(Math.abs(R-prev.at(i))+Math.abs(G-prev.at(i+1))+Math.abs(B-prev.at(i+2))):0;\nif(skin||diff>55){const mx=cam?160-x:x,w=diff>55?2:1;if(mx<74){lx+=mx*w;ly+=y*w;lc+=w;}else if(mx>86){rx+=mx*w;ry+=y*w;rc+=w;}}}\nprev=new Uint8ClampedArray(d);\nreturn(lc>12&&rc>12)?[[(lx/lc)*(c.width/160),(ly/lc)*(c.height/120)],[(rx/rc)*(c.width/160),(ry/rc)*(c.height/120)]]:null;}\nfunction loop(){c.width=innerWidth;c.height=innerHeight;ctx.clearRect(0,0,c.width,c.height);const col=COLS.at(ci),h=track();\nif(h){hold++;const h1=h.at(0),h2=h.at(1);if(!sh1){sh1=h1;sh2=h2;}else{sh1=[sh1.at(0)*.65+h1.at(0)*.35,sh1.at(1)*.65+h1.at(1)*.35];sh2=[sh2.at(0)*.65+h2.at(0)*.35,sh2.at(1)*.65+h2.at(1)*.35];}\nconst sp=Math.hypot(sh2.at(0)-sh1.at(0),sh2.at(1)-sh1.at(1));\nif(hold===3){aspan=Math.max(sp,40);asc=sc;}else if(hold>3&&aspan){const dl=sp-aspan;if(Math.abs(dl)>12)sc=Math.max(35,Math.min(250,sc*.65+(asc*((aspan+dl-Math.sign(dl)*12)/aspan))*.35));}\nctx.strokeStyle=hold>=3?col:\'#888\';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(sh1.at(0),sh1.at(1));ctx.lineTo(sh2.at(0),sh2.at(1));ctx.stroke();\n[sh1,sh2].forEach(p=>{ctx.beginPath();ctx.arc(p.at(0),p.at(1),18,0,6.28);ctx.stroke();});\ndocument.getElementById(\'st\').textContent=hold>=3?\'LOCKED: Pull Arms Apart!\':\'Locking...\';}else{hold=0;sh1=sh2=aspan=null;document.getElementById(\'st\').textContent=\'Wave Both Hands or Pinch\';}\nif(!dr)ay+=.015;const jet=JETS.at(si),pts=jet.at(1),edges=jet.at(2),polys=jet.at(3),cx=c.width/2,cy=c.height/2,ca=Math.cos(ax),sa=Math.sin(ax),cb=Math.cos(ay),sb=Math.sin(ay);\nconst p2=pts.map(([x,y,z])=>{const y1=y*ca-z*sa,z1=y*sa+z*ca,x2=x*cb+z1*sb,z2=-x*sb+z1*cb,f=4.2/(4.2+z2);return[cx+x2*sc*f,cy+y1*sc*f];});\nctx.fillStyle=col+\'28\';polys.forEach(q=>{ctx.beginPath();q.forEach((i,k)=>k?ctx.lineTo(p2.at(i).at(0),p2.at(i).at(1)):ctx.moveTo(p2.at(i).at(0),p2.at(i).at(1)));ctx.closePath();ctx.fill();});\nctx.strokeStyle=col;ctx.lineWidth=4;ctx.shadowColor=col;ctx.shadowBlur=12;edges.forEach(([a,b])=>{ctx.beginPath();ctx.moveTo(p2.at(a).at(0),p2.at(a).at(1));ctx.lineTo(p2.at(b).at(0),p2.at(b).at(1));ctx.stroke();});\nctx.strokeStyle=\'#fff\';ctx.lineWidth=1;ctx.shadowBlur=0;edges.forEach(([a,b])=>{ctx.beginPath();ctx.moveTo(p2.at(a).at(0),p2.at(a).at(1));ctx.lineTo(p2.at(b).at(0),p2.at(b).at(1));ctx.stroke();});\nrequestAnimationFrame(loop);}loop();</script></body></html>', height=900)
+st.markdown("""
+<style>
+  .block-container {{padding: 0 !important; max-width: 100% !important;}}
+  header, footer, #MainMenu {{visibility: hidden;}}
+  iframe {{position: fixed !important; inset: 0 !important; width: 100vw !important; height: 100vh !important; border: none !important;}}
+</style>
+""", unsafe_allow_html=True)
+
+components.html({repr(html)}, height=800)
+'''
+
+open("app.py", "w").write(app_code)
+open("index.html", "w").write(html)
+print("Generated AI MediaPipe app.py and copied to clipboard!")
+EOF
+python3 ~/gen_pro.py && cat ~/app.py | pbcopy
